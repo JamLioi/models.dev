@@ -194,9 +194,12 @@ const CloudflareResponse = z.object({
   }).passthrough(),
 }).passthrough();
 
+// Rows are checked strictly per model in translateModel, so one unexpected row skips
+// that model instead of failing the whole catalog.
 const SourceModel = z.object({
-  catalog: z.union([CatalogModel, MediaCatalogModel]),
+  catalog: CatalogEntry,
   schemaInput: z.unknown().optional(),
+  schemaError: z.string().optional(),
 });
 
 const NoteLines = z.array(z.string().refine((value) => !/[\r\n]/.test(value)));
@@ -273,29 +276,25 @@ export const cloudflareAiGateway = {
     }
 
     const eligible = (model: CatalogEntry) => !model.model_id.startsWith("@cf/") && !skippedModels.has(model.model_id);
-    const emittedModels = textModels.filter(eligible).map((model) => {
-      const parsed = CatalogModel.safeParse(model);
-      if (!parsed.success) throw new Error(`${model.model_id}: invalid catalog entry: ${parsed.error.message}`);
-      return parsed.data;
-    });
+    const emittedModels = textModels.filter(eligible);
     if (emittedModels.length === 0) {
       throw new Error("Cloudflare AI Gateway catalog returned no eligible proxied models");
     }
     const mediaModels = catalog.filter((model) => MEDIA_TASKS[model.task] !== undefined);
-    const emittedMedia = mediaModels.filter(eligible).map((model) => {
-      const parsed = MediaCatalogModel.safeParse(model);
-      if (!parsed.success) throw new Error(`${model.model_id}: invalid catalog entry: ${parsed.error.message}`);
-      return parsed.data;
-    });
+    const emittedMedia = mediaModels.filter(eligible);
     for (const task of new Set(catalog.map((model) => model.task))) {
       if (task !== TEXT_GENERATION && MEDIA_TASKS[task] === undefined && !UNSYNCED_TASKS.has(task)) {
         console.warn(`warning: unknown Cloudflare AI Gateway catalog task: ${task}`);
       }
     }
-    const sources = await mapLimit([...emittedModels, ...emittedMedia], 6, async (model) => ({
-      catalog: model,
-      schemaInput: await loadCatalogSchemaInput(model.model_id),
-    }));
+    // A schema request that fails for one model skips that model, not the catalog.
+    const sources = await mapLimit([...emittedModels, ...emittedMedia], 6, async (model) => {
+      try {
+        return { catalog: model, schemaInput: await loadCatalogSchemaInput(model.model_id) };
+      } catch (error) {
+        return { catalog: model, schemaError: error instanceof Error ? error.message : String(error) };
+      }
+    });
 
     const liveIDs = new Set([...textModels, ...mediaModels].map((model) => model.model_id));
     for (const id of Object.keys(curation.models)) {
@@ -307,10 +306,14 @@ export const cloudflareAiGateway = {
   parseModels(raw) {
     return SourceModel.array().parse(raw);
   },
-  translateModel(source, context) {
-    const id = source.catalog.model_id;
+  translateModel(raw, context) {
+    const id = raw.catalog.model_id;
+    const isText = raw.catalog.task === TEXT_GENERATION;
+    const parsed = (isText ? CatalogModel : MediaCatalogModel).safeParse(raw.catalog);
+    if (!parsed.success) throw new Error(`${id}: invalid catalog entry: ${parsed.error.message}`);
+    if (raw.schemaError !== undefined) throw new Error(raw.schemaError);
+    const source = { catalog: parsed.data, schemaInput: raw.schemaInput };
     const curated = curation.models[id] ?? {};
-    const isText = source.catalog.task === TEXT_GENERATION;
     // A new model with no lab file is reported in the PR instead of failing
     // the whole sync; an existing file still fails loudly if its lab is gone.
     const base = curated.base_model ?? (isText ? resolveBaseModel(id) : resolveMediaBaseModel(id));

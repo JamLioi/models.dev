@@ -315,7 +315,7 @@ test("uses curated cost only when provider_details is null", () => {
   }, undefined, curated)).toThrow("remove the curated cost");
 });
 
-test("names the catalog model when an entry fails validation", async () => {
+test("an invalid row fails only that model, at translation", async () => {
   const originalFetch = globalThis.fetch;
   const originalToken = process.env.CLOUDFLARE_API_TOKEN;
   const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -328,7 +328,10 @@ test("names the catalog model when an entry fails validation", async () => {
   }])));
 
   try {
-    await expect(cloudflareAiGateway.fetchModels()).rejects.toThrow("openai/gpt-4.1: invalid catalog entry");
+    const sources = cloudflareAiGateway.parseModels(await cloudflareAiGateway.fetchModels());
+    expect(sources.map((source) => source.catalog.model_id)).toEqual(["openai/gpt-4.1"]);
+    expect(() => cloudflareAiGateway.translateModel(sources[0]!, { existing: () => undefined, authored: () => undefined }))
+      .toThrow("openai/gpt-4.1: invalid catalog entry");
   } finally {
     globalThis.fetch = originalFetch;
     restoreEnv("CLOUDFLARE_API_TOKEN", originalToken);
@@ -1188,4 +1191,13 @@ test("a media row whose upstreams disagree on price isn't guessed either", () =>
   ).doc;
   expect(build(0.0001).base_model).toBe("elevenlabs/eleven_v3");
   expect(() => build(0.0002)).toThrow("list different prices");
+});
+
+test("a failed schema request fails only that model, at translation", () => {
+  const source = cloudflareAiGateway.parseModels([{
+    catalog: { model_id: "openai/gpt-4.1", task: "Text Generation", provider_details: providerDetails({ input_tokens: 2, output_tokens: 8 }) },
+    schemaError: "Cloudflare AI Gateway schema request failed for openai/gpt-4.1: 500 Internal Server Error",
+  }])[0]!;
+  expect(() => cloudflareAiGateway.translateModel(source, { existing: () => undefined, authored: () => undefined }))
+    .toThrow("schema request failed for openai/gpt-4.1");
 });
