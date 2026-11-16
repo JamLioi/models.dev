@@ -101,6 +101,13 @@ const ProviderDetail = z.object({
   pricing: z.record(Price),
 }).passthrough();
 
+// The catalog read itself only needs a safe id and a task per row; everything else about a
+// row is checked per model in translateModel, so one odd row skips that model only.
+const CatalogRow = z.object({
+  model_id: z.string().refine(isSafeModelID, "model_id must be a safe relative provider/model path"),
+  task: z.string(),
+}).passthrough();
+
 const CatalogEntry = z.object({
   model_id: z.string().refine(isSafeModelID, "model_id must be a safe relative provider/model path"),
   task: z.string(),
@@ -184,7 +191,7 @@ const Tier512kPricing = z.object({
 
 const CloudflareResponse = z.object({
   success: z.literal(true),
-  result: z.array(CatalogEntry),
+  result: z.array(CatalogRow),
   result_info: z.object({
     page: z.number().int().positive(),
     per_page: z.number().int().positive(),
@@ -197,7 +204,7 @@ const CloudflareResponse = z.object({
 // Rows are checked strictly per model in translateModel, so one unexpected row skips
 // that model instead of failing the whole catalog.
 const SourceModel = z.object({
-  catalog: CatalogEntry,
+  catalog: CatalogRow,
   schemaInput: z.unknown().optional(),
   schemaError: z.string().optional(),
 });
@@ -242,6 +249,7 @@ const Curation = z.object({
 type CatalogModel = z.infer<typeof CatalogModel>;
 type MediaCatalogModel = z.infer<typeof MediaCatalogModel>;
 type CatalogEntry = z.infer<typeof CatalogEntry>;
+type CatalogRow = z.infer<typeof CatalogRow>;
 type SourceModel = z.infer<typeof SourceModel>;
 type CuratedModel = z.infer<typeof CuratedModel>;
 
@@ -265,7 +273,7 @@ export const cloudflareAiGateway = {
     ];
   },
   async fetchModels() {
-    const catalog = CatalogEntry.array().parse(await loadCatalog());
+    const catalog = CatalogRow.array().parse(await loadCatalog());
     const catalogIDs = new Set(catalog.map((model) => model.model_id));
     if (catalogIDs.size !== catalog.length) {
       throw new Error("Cloudflare AI Gateway catalog returned duplicate model IDs");
@@ -275,7 +283,7 @@ export const cloudflareAiGateway = {
       throw new Error("Cloudflare AI Gateway catalog returned no Text Generation models");
     }
 
-    const eligible = (model: CatalogEntry) => !model.model_id.startsWith("@cf/") && !skippedModels.has(model.model_id);
+    const eligible = (model: CatalogRow) => !model.model_id.startsWith("@cf/") && !skippedModels.has(model.model_id);
     const emittedModels = textModels.filter(eligible);
     if (emittedModels.length === 0) {
       throw new Error("Cloudflare AI Gateway catalog returned no eligible proxied models");
@@ -1028,7 +1036,7 @@ function validateCatalogPages(pages: Array<z.infer<typeof CloudflareResponse>>, 
     throw new Error(`${source} contains ${pages.length}/${expectedPages} pages`);
   }
 
-  const models: CatalogEntry[] = [];
+  const models: CatalogRow[] = [];
   const ids = new Set<string>();
   for (const [index, page] of pages.entries()) {
     if (page.result_info.page !== index + 1) {
@@ -1139,7 +1147,8 @@ async function mapLimit<T, R>(items: T[], limit: number, transform: (item: T) =>
 // Cloudflare doesn't say which upstream a multi-provider row bills at, so a row whose upstreams disagree isn't guessed.
 function assertOneUpstreamPrice(catalog: { model_id: string; provider_details?: { id: string; pricing: unknown }[] | null }) {
   const details = catalog.provider_details ?? [];
-  if (new Set(details.map((entry) => JSON.stringify(entry.pricing))).size > 1) {
+  const key = (pricing: unknown) => JSON.stringify(Object.entries(pricing as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)));
+  if (new Set(details.map((entry) => key(entry.pricing))).size > 1) {
     throw new Error(`${catalog.model_id}: providers ${details.map((entry) => entry.id).join(", ")} list different prices`);
   }
 }

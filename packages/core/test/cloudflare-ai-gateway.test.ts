@@ -1201,3 +1201,23 @@ test("a failed schema request fails only that model, at translation", () => {
   expect(() => cloudflareAiGateway.translateModel(source, { existing: () => undefined, authored: () => undefined }))
     .toThrow("schema request failed for openai/gpt-4.1");
 });
+
+test("a row with a bad field elsewhere still only fails that model", () => {
+  const sources = cloudflareAiGateway.parseModels([
+    { catalog: { model_id: "openai/gpt-4.1", task: "Text Generation", provider_details: [{ id: "x", pricing: { input_tokens: -1 } }] } },
+  ]);
+  expect(() => cloudflareAiGateway.translateModel(sources[0]!, { existing: () => undefined, authored: () => undefined }))
+    .toThrow("openai/gpt-4.1: invalid catalog entry");
+});
+
+test("upstreams that list the same prices in a different key order agree", () => {
+  const schema = { properties: { output_config: { properties: { effort: { enum: ["low", "high"] } } } } };
+  expect(buildCloudflareAiGatewayModel({
+    model_id: "anthropic/claude-opus-5.5",
+    task: "Text Generation",
+    provider_details: [
+      { id: "first", pricing: { input_tokens: 4, output_tokens: 20 } },
+      { id: "second", pricing: { output_tokens: 20, input_tokens: 4 } },
+    ],
+  }, schema).cost).toMatchObject({ input: 4, output: 20 });
+});
